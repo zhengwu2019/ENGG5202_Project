@@ -72,7 +72,7 @@ class CIFAR100(VisionDataset):
         # division code used only once and save the seq numbers to pkl file.
         if sub_set != -1:
             sub_indices_path = "./data/cifar-100-python/subset_indices.pkl"
-            num_subsets = 10
+            num_subsets = 5
             if not os.path.exists(sub_indices_path):
                 num_classes = 100
                 training_size = 50000

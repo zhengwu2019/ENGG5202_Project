@@ -139,6 +139,11 @@ class ResNet(nn.Module):
         return out
 
 
+def resnet8():
+    """ return a ResNet 18 object
+    """
+    return ResNet(BasicBlock, [1, 1, 1])
+
 def resnet18():
     """ return a ResNet 18 object
     """
@@ -163,3 +168,14 @@ def resnet152():
     """ return a ResNet 152 object
     """
     return ResNet(Bottleneck, [3, 8, 36, 3])
+
+
+
+class AssignerNet(nn.Module):
+    def __init__(self, in_planes, planes, stride=1):
+        super(AssignerNet, self).__init__()
+        self.assign_net = resnet18()
+
+    def forward(self, x):
+        out = self.assign_net(x)
+        return out

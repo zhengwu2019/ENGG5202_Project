@@ -3,6 +3,7 @@ import os
 import shutil
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -21,10 +22,12 @@ model_names = sorted(name for name in resnet.__dict__
                      and callable(resnet.__dict__[name]))
 
 #print(model_names)
+# resnet152:
+# -1: 72.910, 0: 71.14,
+#
+select_model = "resnet34"
+mode = "test"
 
-select_model = "resnet18"
-mode = "train"
-cfg_sub_set = 0
 
 #CUDA_VISIBLE_DEVICES=0 python trainer.py
 
@@ -32,6 +35,7 @@ evaluate = False if mode=='train' else True
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
 parser.add_argument('-e', '--evaluate', default=evaluate, help='evaluate model on validation set')
+parser.add_argument('--cfg_sub_set', default=-1, type=int, help='use pre-trained model')
 parser.add_argument('--pretrained', default='./checkpoints/' + select_model + '/', type=str, help='use pre-trained model')
 
 parser.add_argument('--arch', '-a', metavar='ARCH', default=select_model,
@@ -62,13 +66,14 @@ parser.add_argument('--save-dir', default="./checkpoints/" + select_model,
                     help='The directory used to save the trained models', type=str)
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
-                    type=int, default=10)
+                    type=int, default=5)
 best_prec1 = 0
 
 
 def main():
     global args, best_prec1
     args = parser.parse_args()
+    cfg_sub_set = args.cfg_sub_set
 
 
     # Check the save_dir exists or not
@@ -84,7 +89,7 @@ def main():
             all_pretrained_checkpoints = os.listdir(args.pretrained)
             #checkpoint_path = [pretrained_checkpoint for pretrained_checkpoint in all_pretrained_checkpoints if pretrained_checkpoint.startswith(args.arch)][0]
             #checkpoint_path = max(all_pretrained_checkpoints)
-            checkpoint_path = select_model + "_val_"+ str(cfg_sub_set) + "_epoch_100.th"
+            checkpoint_path = select_model + "_val_"+ str(cfg_sub_set) + "_epoch_195.th"
             checkpoint_path = args.pretrained + checkpoint_path
         else:
             checkpoint_path = args.resume
@@ -106,13 +111,17 @@ def main():
     # 45000 images, 313 batches, 100 classes
     train_loader = torch.utils.data.DataLoader(
         datasets.CIFAR100(root='./data', train=True, transform=transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, 4),
+            transforms.RandomRotation(15),
+            # transforms.RandomHorizontalFlip(),
+            # transforms.RandomCrop(32, 4),
             transforms.ToTensor(),
             normalize,
         ]), download=False, sub_set=cfg_sub_set, val=False,),
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True)
+
 
     # 5000/10000 images, 79 batches, 100 classes.
     val_loader = torch.utils.data.DataLoader(
@@ -122,7 +131,6 @@ def main():
         ]), sub_set=cfg_sub_set, val=True,),
         batch_size=128, shuffle=False,
         num_workers=args.workers, pin_memory=True)
-
 
 
     # 10000 images, 79 batches, 100 classes.
@@ -154,7 +162,7 @@ def main():
 
 
     if args.evaluate:
-        validate(val_loader, model, criterion, save_pred=False)
+        validate(val_loader, model, criterion, enable_save_pred=True)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -164,15 +172,24 @@ def main():
         lr_scheduler.step()
 
         if epoch > 0 and (epoch + 1) % args.save_every == 0:
-            prec1 = validate(val_loader, model, criterion, save_pred=(epoch + 1) == args.epochs)
+            prec1 = validate(val_loader, model, criterion, enable_save_pred=(epoch + 1) == args.epochs)
             is_best = prec1 > best_prec1
             best_prec1 = max(prec1, best_prec1)
+
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'best_prec1': best_prec1,
+            }, is_best, filename=os.path.join(args.save_dir, select_model + '_val_' + str(val_loader.dataset.sub_set) + '_epoch_'+ str(epoch + 1) +'.th'))
+
             if epoch + 1 == args.epochs:
                 save_checkpoint({
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
                     'best_prec1': best_prec1,
                 }, is_best, filename=os.path.join(args.save_dir, select_model + '_val_' + str(val_loader.dataset.sub_set) + '_epoch_'+ str(epoch + 1) +'.th'))
+                print("TRAINING FINISHED")
+                return
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -229,7 +246,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                       data_time=data_time, loss=losses, top1=top1))
 
 
-def validate(val_loader, model, criterion, save_pred=False):
+def validate(val_loader, model, criterion, enable_save_pred=False):
     """
     Run evaluation
     """
@@ -259,7 +276,7 @@ def validate(val_loader, model, criterion, save_pred=False):
             loss = loss.float()
 
             # measure accuracy and record loss
-            if save_pred:
+            if enable_save_pred:
                 save_predictions(output.data, target, saved_pred, batch_num=i, total_batch=len(val_loader)-1, sub_set=val_loader.dataset.sub_set)
             prec1 = accuracy(output.data, target)[0]
             losses.update(loss.item(), input.size(0))
@@ -307,23 +324,59 @@ class AverageMeter(object):
 
 def save_predictions(output, target, saved_pred, batch_num, total_batch, sub_set):
     '''
-        output: [batch_size, num_classes];
-        target: [batch_size];
-
+        output: [batch_size, num_classes]
+        target: [batch_size]
         saved_pred: [10000/50000, batch_size, 103], 103 -> [1 (correct pred), 1 (seq_num), 1 (target), 10 (pred)]
     '''
-    seq_num_range = [batch_num * 128, (batch_num+1) * 128]
-    if seq_num_range[1] > saved_pred.shape[0]:
-        seq_num_range[1] = saved_pred.shape[0]
+    index_range = [batch_num * 128, (batch_num + 1) * 128]
+    start_seq_num=0
+    if sub_set != -1:
+        start_seq_num = sub_set * saved_pred.shape[0]
+    seq_num_range = [batch_num * 128 + start_seq_num, (batch_num+1) * 128 + start_seq_num]
+    if seq_num_range[1] > saved_pred.shape[0] + start_seq_num:
+        seq_num_range[1] = saved_pred.shape[0] + start_seq_num
+        index_range[1] = saved_pred.shape[0]
+
+    index_range = torch.arange(*index_range).view(-1, 1).cuda()
+
     sample_seq_num = torch.arange(*seq_num_range).view(-1, 1).cuda()
     pred_target = output.max(dim=1)[1]
     correctness = (target == pred_target).float().view(-1, 1)
-    saved_pred[sample_seq_num.squeeze()] = torch.cat([correctness, sample_seq_num.float(), target.view(-1, 1).float(), output], dim=1)  # [128, 103]
+
+
+    saved_pred[index_range.squeeze()] = torch.cat([sample_seq_num.float(), correctness, target.view(-1, 1).float(), output], dim=1)  # [128, 103]
+
     if batch_num == total_batch:
         pred_save_path = "./pred_pkl/" + select_model + "_val_" + str(sub_set) +'_pred.pkl'
         with open(pred_save_path, 'wb') as f:
             pkl.dump(saved_pred, f)
         print("{} saved.".format(pred_save_path))
+
+def concat_predictions(pkl_dir="./pred_pkl/"):
+    file_names = os.listdir(pkl_dir)
+    cat_data = {}
+
+    for file_name in file_names:
+        file_path = os.path.join(pkl_dir, file_name)
+        with open(file_path, 'rb') as f:
+            print(file_path)
+            pred_data = pkl.load(f).cpu().numpy()
+            f.close()
+
+        model_name = file_name.split('_')[0]
+        if file_name.split('_')[2] != '-1':
+            if model_name in cat_data.keys():
+                cat_data[model_name] = np.concatenate([cat_data[model_name], pred_data], axis=0)
+            else:
+                cat_data[model_name] = pred_data
+
+    for key in cat_data.keys():
+        pred_data = cat_data[key]
+        cat_data_path = './cat_pred_pkl/' + key + '_cat_pred_data.pkl'
+        with open(cat_data_path, 'wb') as f:
+            pkl.dump(pred_data, f)
+            print(cat_data_path+" is dumped!")
+            f.close()
 
 
 def accuracy(output, target, topk=(1,)):
@@ -344,3 +397,4 @@ def accuracy(output, target, topk=(1,)):
 
 if __name__ == '__main__':
     main()
+    #concat_predictions()
